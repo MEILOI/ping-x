@@ -32,13 +32,13 @@
 在 Linux 系统中运行以下命令，快速部署 PingX Monitor！🎉
 
 ```bash
-wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pingX_monitor.sh && chmod +x pingX_monitor.sh && sudo ./pingX_monitor.sh
+wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pingX_monitor.sh && chmod +x pingX_monitor.sh && bash ./pingX_monitor.sh
 ```
 
 **English**: Run the following command in a Linux system to quickly deploy PingX Monitor! 🎉
 
 ```bash
-wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pingX_monitor.sh && chmod +x pingX_monitor.sh && sudo ./pingX_monitor.sh
+wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pingX_monitor.sh && chmod +x pingX_monitor.sh && bash ./pingX_monitor.sh
 ```
 
 ### 安装步骤 | Installation Steps
@@ -53,7 +53,7 @@ wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pi
    ```
 3. **运行安装 | Run Installation**:
    ```bash
-   sudo ./pingX_monitor.sh
+   bash ./pingX_monitor.sh
    ```
 4. **配置 | Configure**:
    - 选择通知方式（Telegram 或钉钉）📩
@@ -75,7 +75,7 @@ wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pi
    ```
 3. *Run Installation*:
    ```bash
-   sudo ./pingX_monitor.sh
+   bash ./pingX_monitor.sh
    ```
 4. *Configure*:
    - Choose notification method (Telegram or DingTalk) 📩
@@ -93,7 +93,7 @@ wget https://raw.githubusercontent.com/MEILOI/ping-x/main/pingX_monitor.sh -O pi
 运行脚本，进入交互式菜单：
 
 ```bash
-sudo /usr/local/bin/pingX_monitor.sh
+bash /usr/local/bin/pingX_monitor.sh
 ```
 
 ### 菜单选项 | Menu Options
