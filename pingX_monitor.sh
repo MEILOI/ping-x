@@ -1,24 +1,20 @@
 #!/bin/sh
 
-# PingX Monitor Script v1.1.2
+# PingX Monitor Script v1.1.7
 # Purpose: Monitor host ping status and send notifications via Telegram or DingTalk
 # Author: TheX
 # GitHub: https://github.com/MEILOI/ping-x
 # License: MIT
-# Version: 1.1.2 (2025-05-24)
+# Version: 1.1.7 (2025-05-25)
 # Changelog:
-# - v1.1.2: Fixed syntax error in ash (line 896), simplified modify_config loops,
-#            replaced eval with sed/grep, enhanced ash compatibility, verified with sh -n
-# - v1.1.1: Fixed syntax error in ash (line 880), removed bash associative arrays,
-#            used file-based state storage, simplified nested structures
-# - v1.1.0: Optimized for iStoreOS/OpenWrt: removed systemd, adapted crontab to /etc/crontabs/root,
-#            used /bin/sh, persistent state in /etc/, opkg for dependencies, improved Webhook debug
-# - v1.0.8: Added domain name support, renamed to pingX_monitor, updated menu header
+# - v1.1.7: Fixed eval syntax error, restored settings menu, enhanced DingTalk validation
+# - v1.1.6: Added DingTalk keyword, enhanced monitor logs, fixed offline notification
+# - v1.1.5: Simplified to Chinese with English translations, fixed CRLF
 
 # Detect OpenWrt/iStoreOS environment
 if [ -f /etc/openwrt_release ]; then
     CRONTAB_PATH="/etc/crontabs/root"
-    echo "Detected OpenWrt/iStoreOS, using $CRONTAB_PATH for crontab"
+    echo "檢測到 OpenWrt/iStoreOS，使用 $CRONTAB_PATH 配置計劃任務 (Detected OpenWrt/iStoreOS, using $CRONTAB_PATH)"
 else
     CRONTAB_PATH="/etc/crontab"
 fi
@@ -27,11 +23,12 @@ CONFIG_FILE="/etc/pingX_monitor.conf"
 SCRIPT_PATH="/usr/local/bin/pingX_monitor.sh"
 STATE_FILE="/etc/pingX_monitor.state"
 LOCK_FILE="/var/lock/pingX_monitor.lock"
-CRON_JOB="*/1 * * * * root /usr/local/bin/pingX_monitor.sh monitor >> /var/log/pingX_monitor.log 2>&1"
+CRON_JOB="*/1 * * * * /usr/local/bin/pingX_monitor.sh monitor >> /var/log/pingX_monitor.log 2>&1"
 LOG_FILE="/var/log/pingX_monitor.log"
 LOG_MAX_SIZE=$((5*1024*1024)) # 5MB
 MAX_LOG_FILES=5
 TG_API="https://api.telegram.org/bot"
+DINGTALK_KEYWORD="PingX" # Change to your DingTalk keyword if different
 
 # Colors for output
 RED='\033[0;31m'
@@ -54,13 +51,14 @@ log() {
         done
         mv "$LOG_FILE" "$LOG_FILE.1"
         touch "$LOG_FILE"
-        log "Log rotated due to size limit"
+        log "日誌已輪替，因超出大小限制 (Log rotated due to size limit)"
     fi
 }
 
 # Load configuration
 load_config() {
     [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+    log "已載入配置: NOTIFY_TYPE=$NOTIFY_TYPE, HOSTS_LIST=$HOSTS_LIST (Loaded config)"
 }
 
 # Save configuration
@@ -77,57 +75,52 @@ INTERVAL="$INTERVAL"
 OFFLINE_THRESHOLD="$OFFLINE_THRESHOLD"
 EOF
     chmod 600 "$CONFIG_FILE"
-    log "Configuration saved to $CONFIG_FILE"
+    log "配置已保存至 $CONFIG_FILE (Configuration saved)"
 }
 
-# Load state (FAILURE_COUNTS and HOST_STATUS from file)
+# Load state
 load_state() {
     if [ -f "$STATE_FILE" ]; then
+        log "載入狀態文件: $STATE_FILE (Loading state)"
         while IFS='=' read -r key value; do
             case "$key" in
-                FAILURE_COUNTS_*)
-                    host=$(echo "$key" | sed 's/^FAILURE_COUNTS_//')
-                    echo "FAILURE_COUNTS_$host=$value" >> /tmp/pingX_state
-                    ;;
-                HOST_STATUS_*)
-                    host=$(echo "$key" | sed 's/^HOST_STATUS_//')
-                    echo "HOST_STATUS_$host=$value" >> /tmp/pingX_state
+                FAILURE_COUNTS_*|HOST_STATUS_*)
+                    eval "$key=$value"
                     ;;
             esac
         done < "$STATE_FILE"
-        [ -f /tmp/pingX_state ] && . /tmp/pingX_state
-        rm -f /tmp/pingX_state
-        log "Loaded state from $STATE_FILE"
     fi
 }
 
 # Save state
 save_state() {
     : > "$STATE_FILE"
-    for host in $(echo "$HOSTS_LIST" | tr ',' ' '); do
-        count=$(grep "^FAILURE_COUNTS_$host=" /tmp/pingX_state 2>/dev/null | cut -d'=' -f2 || echo "0")
-        status=$(grep "^HOST_STATUS_$host=" /tmp/pingX_state 2>/dev/null | cut -d'=' -f2 || echo "0")
-        echo "FAILURE_COUNTS_$host=$count" >> "$STATE_FILE"
-        echo "HOST_STATUS_$host=$status" >> "$STATE_FILE"
+    local hosts=$(echo "$HOSTS_LIST" | tr ',' ' ')
+    for host in $hosts; do
+        local safe_host=$(echo "$host" | tr '.' '_')
+        eval "count=\${FAILURE_COUNTS_$safe_host:-0}"
+        eval "status=\${HOST_STATUS_$safe_host:-0}"
+        echo "FAILURE_COUNTS_$safe_host=$count" >> "$STATE_FILE"
+        echo "HOST_STATUS_$safe_host=$status" >> "$STATE_FILE"
     done
     chmod 600 "$STATE_FILE"
-    log "Saved state to $STATE_FILE"
+    log "狀態已保存 (Saved state)"
 }
 
 # Validate Telegram configuration
 validate_telegram() {
     if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_IDS" ]; then
-        ping -c 1 api.telegram.org >/dev/null 2>&1 || log "WARNING: Cannot reach Telegram server"
+        ping -c 1 api.telegram.org >/dev/null 2>&1 || log "警告：無法連接到 Telegram 伺服器 (Cannot reach Telegram server)"
         local response=$(curl -s -m 5 "${TG_API}${TG_BOT_TOKEN}/getMe")
         if echo "$response" | grep -q '"ok":true'; then
-            log "Telegram Bot validation succeeded"
+            log "Telegram Bot 驗證成功 (Validation succeeded)"
             return 0
         else
-            log "ERROR: Telegram validation failed: $response"
+            log "錯誤：Telegram 驗證失敗: $response (Validation failed)"
             return 1
         fi
     else
-        log "ERROR: Telegram configuration incomplete"
+        log "錯誤：Telegram 配置不完整 (Configuration incomplete)"
         return 1
     fi
 }
@@ -135,16 +128,16 @@ validate_telegram() {
 # Validate DingTalk Webhook
 validate_dingtalk() {
     local webhook="$1"
-    ping -c 1 oapi.dingtalk.com >/dev/null 2>&1 || log "WARNING: Cannot reach DingTalk server"
+    ping -c 1 oapi.dingtalk.com >/dev/null 2>&1 || log "警告：無法連接到釘釘伺服器 (Cannot reach DingTalk server)"
+    local message="$DINGTALK_KEYWORD: 測試訊息 (Test message)"
     local response=$(curl -s -m 5 -X POST "$webhook" \
         -H "Content-Type: application/json" \
-        -d '{"msgtype": "text", "text": {"content": "Test message"}}')
-    local curl_exit=$?
-    if [ $curl_exit -eq 0 ] && echo "$response" | grep -q '"errcode":0'; then
-        log "DingTalk Webhook validation succeeded: $(echo "$webhook" | cut -c1-10)****"
+        -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$message\"}}")
+    if [ $? -eq 0 ] && echo "$response" | grep -q '"errcode":0'; then
+        log "釘釘 Webhook 驗證成功 (Validation succeeded)"
         return 0
     else
-        log "ERROR: DingTalk Webhook validation failed: $(echo "$webhook" | cut -c1-10)****, curl exit: $curl_exit, response: $response"
+        log "錯誤：釘釘 Webhook 驗證失敗: $response (Validation failed)"
         return 1
     fi
 }
@@ -153,43 +146,40 @@ validate_dingtalk() {
 send_tg_notification() {
     local message="$1"
     if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_IDS" ]; then
-        log "ERROR: Telegram configuration incomplete"
+        log "錯誤：Telegram 配置不完整 (Configuration incomplete)"
         return 1
     fi
-
     local IDS=$(echo "$TG_CHAT_IDS" | tr ',' ' ')
     local success=0
     for id in $IDS; do
-        response=$(curl -s -m 5 -w "\nHTTP_CODE:%{http_code}" -X POST "${TG_API}${TG_BOT_TOKEN}/sendMessage" \
+        response=$(curl -s -m 5 -X POST "${TG_API}${TG_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{\"chat_id\": \"$id\", \"text\": \"$message\", \"parse_mode\": \"Markdown\"}")
-        http_code=$(echo "$response" | grep "HTTP_CODE" | cut -d':' -f2)
-        response_body=$(echo "$response" | grep -v "HTTP_CODE")
-        if echo "$response_body" | grep -q '"ok":true'; then
-            log "Telegram notification sent to $id: $message"
+        if echo "$response" | grep -q '"ok":true'; then
+            log "Telegram 通知已發送至 $id (Notification sent)"
             success=1
         else
-            log "ERROR: Failed to send Telegram message to $id (HTTP $http_code): $response_body"
+            log "錯誤：發送 Telegram 通知失敗: $response (Failed to send)"
         fi
     done
     [ $success -eq 1 ] && return 0 || return 1
 }
 
-# Send DingTalk Webhook notification
+# Send DingTalk notification
 send_dingtalk_notification() {
-    local message="$1"
+    local message="$DINGTALK_KEYWORD: $1"
     if [ -z "$DINGTALK_WEBHOOK" ]; then
-        log "ERROR: DingTalk Webhook not configured"
+        log "錯誤：釘釘 Webhook 未配置 (Webhook not configured)"
         return 1
     fi
     local response=$(curl -s -m 5 -X POST "$DINGTALK_WEBHOOK" \
         -H "Content-Type: application/json" \
         -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$message\"}}")
     if [ $? -eq 0 ] && echo "$response" | grep -q '"errcode":0'; then
-        log "DingTalk notification sent: $message"
+        log "釘釘通知已發送: $message (Notification sent)"
         return 0
     else
-        log "ERROR: Failed to send DingTalk notification: $response"
+        log "錯誤：發送釘釘通知失敗: $response (Failed to send)"
         return 1
     fi
 }
@@ -209,92 +199,98 @@ ping_host() {
     local HOST="$1"
     local REMARK="$2"
     local CURRENT_TIME=$(date +"%Y-%m-%d %H:%M:%S")
-    local PING_RESULT
+    local PING_RESULT=$(ping -c 1 -W 2 "$HOST" 2>&1)
+    local PING_EXIT=$?
     local STATUS=""
     local LOG_ENTRY=""
+    local safe_host=$(echo "$HOST" | tr '.' '_')
 
-    PING_RESULT=$(ping -c 1 -W 2 "$HOST" 2>&1)
-    local PING_EXIT=$?
+    log "對 $HOST ($REMARK) 進行 Ping，退出碼: $PING_EXIT (Ping attempt, exit code: $PING_EXIT)"
 
-    log "Ping attempt for $HOST ($REMARK): $PING_RESULT"
-
-    local FAILURE_COUNTS=$(grep "^FAILURE_COUNTS_$HOST=" /tmp/pingX_state 2>/dev/null | cut -d'=' -f2 || echo "0")
-    local HOST_STATUS=$(grep "^HOST_STATUS_$HOST=" /tmp/pingX_state 2>/dev/null | cut -d'=' -f2 || echo "0")
+    eval "FAILURE_COUNTS=\${FAILURE_COUNTS_$safe_host:-0}"
+    eval "HOST_STATUS=\${HOST_STATUS_$safe_host:-0}"
+    log "當前狀態: $HOST ($REMARK), 失敗次數=$FAILURE_COUNTS, 狀態=$HOST_STATUS (Current state)"
 
     if [ $PING_EXIT -eq 0 ] && echo "$PING_RESULT" | grep -q "1 packets transmitted, 1 packets received"; then
         local RESPONSE_TIME=$(echo "$PING_RESULT" | grep "time=" | awk -F"time=" '{print $2}' | awk '{print $1}')
-        STATUS="Ping successful, response time: ${RESPONSE_TIME}ms"
+        STATUS="Ping 成功，響應時間: ${RESPONSE_TIME}ms (Ping successful)"
         if [ "$HOST_STATUS" = "1" ]; then
             HOST_STATUS=0
             FAILURE_COUNTS=0
-            local message="✅ *Host Online Notification*\n\n📍 *Host*: $HOST\n📝 *Remark*: $REMARK\n🕒 *Time*: $CURRENT_TIME"
-            send_notification "$message" && LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS - Online notification sent" || LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS - Online notification failed"
-            log "Reset $HOST: Failure count=$FAILURE_COUNTS, Status=$HOST_STATUS"
+            local message="✅ *主機上線通知 (Host Online Notification)*\n\n📍 *主機*: $HOST\n📝 *備註*: $REMARK\n🕒 *時間*: $CURRENT_TIME"
+            send_notification "$message" && LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS - 上線通知已發送 (Online notification sent)" || LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS - 上線通知失敗 (Online notification failed)"
         else
             LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS"
             FAILURE_COUNTS=0
-            log "Reset $HOST: Failure count=$FAILURE_COUNTS, Status=$HOST_STATUS"
         fi
     else
-        STATUS="Ping failed: $PING_RESULT"
+        STATUS="Ping 失敗: $PING_RESULT (Ping failed)"
         FAILURE_COUNTS=$((FAILURE_COUNTS + 1))
-        LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS"
-        log "Failure count for $HOST: $FAILURE_COUNTS, Threshold: $OFFLINE_THRESHOLD, Status: $HOST_STATUS"
+        LOG_ENTRY="$CURRENT_TIME - $HOST ($REMARK) - $STATUS - 失敗次數=$FAILURE_COUNTS"
         if [ "$FAILURE_COUNTS" -ge "$OFFLINE_THRESHOLD" ] && [ "$HOST_STATUS" = "0" ]; then
             HOST_STATUS=1
-            local message="🛑 *Host Offline Notification*\n\n📍 *Host*: $HOST\n📝 *Remark*: $REMARK\n🕒 *Time*: $CURRENT_TIME\n⚠️ *Consecutive Failures*: ${FAILURE_COUNTS}"
-            send_notification "$message" && LOG_ENTRY="$LOG_ENTRY - Offline notification sent" || LOG_ENTRY="$LOG_ENTRY - Offline notification failed"
+            local message="🛑 *主機離線通知 (Host Offline Notification)*\n\n📍 *主機*: $HOST\n📝 *備註*: $REMARK\n🕒 *時間*: $CURRENT_TIME\n⚠️ *連續失敗*: ${FAILURE_COUNTS}次 (Consecutive Failures)"
+            send_notification "$message" && LOG_ENTRY="$LOG_ENTRY - 離線通知已發送 (Offline notification sent)" || LOG_ENTRY="$LOG_ENTRY - 離線通知失敗 (Offline notification failed)"
         fi
     fi
 
-    sed -i "/^FAILURE_COUNTS_$HOST=/d" /tmp/pingX_state 2>/dev/null
-    sed -i "/^HOST_STATUS_$HOST=/d" /tmp/pingX_state 2>/dev/null
-    echo "FAILURE_COUNTS_$HOST=$FAILURE_COUNTS" >> /tmp/pingX_state
-    echo "HOST_STATUS_$HOST=$HOST_STATUS" >> /tmp/pingX_state
+    eval "FAILURE_COUNTS_$safe_host=$FAILURE_COUNTS"
+    eval "HOST_STATUS_$safe_host=$HOST_STATUS"
 
     echo "$LOG_ENTRY"
     echo "$LOG_ENTRY" >> "$LOG_FILE"
 }
 
-# Monitor function (called by cron)
+# Monitor function
 monitor() {
     exec 200>"$LOCK_FILE"
     if ! flock -n 200; then
-        log "Another monitor instance is running, exiting"
+        log "另一個監控實例正在運行，退出 (Another instance running, exiting)"
         return 1
     fi
 
     load_config
-    load_state
+    log "開始監控: HOSTS_LIST=$HOSTS_LIST, INTERVAL=$INTERVAL, OFFLINE_THRESHOLD=$OFFLINE_THRESHOLD (Starting monitor)"
 
     if [ "$NOTIFY_TYPE" = "telegram" ]; then
-        validate_telegram || return 1
+        validate_telegram || log "Telegram 驗證失敗，繼續監控 (Validation failed, continuing)"
     elif [ "$NOTIFY_TYPE" = "dingtalk" ]; then
-        validate_dingtalk "$DINGTALK_WEBHOOK" || return 1
+        validate_dingtalk "$DINGTALK_WEBHOOK" || log "釘釘驗證失敗，繼續監控 (Validation failed, continuing)"
+    fi
+
+    if [ -z "$HOSTS_LIST" ]; then
+        log "錯誤：無主機配置，退出監控 (No hosts configured, exiting)"
+        return 1
     fi
 
     local HOSTS=$(echo "$HOSTS_LIST" | tr ',' ' ')
     local REMARKS="$REMARKS_LIST"
-
+    local i=1
     for HOST in $HOSTS; do
-        grep -q "^FAILURE_COUNTS_$HOST=" /tmp/pingX_state 2>/dev/null || echo "FAILURE_COUNTS_$HOST=0" >> /tmp/pingX_state
-        grep -q "^HOST_STATUS_$HOST=" /tmp/pingX_state 2>/dev/null || echo "HOST_STATUS_$HOST=0" >> /tmp/pingX_state
-        log "Initialized $HOST: Failure count=$(grep "^FAILURE_COUNTS_$HOST=" /tmp/pingX_state | cut -d'=' -f2), Status=$(grep "^HOST_STATUS_$HOST=" /tmp/pingX_state | cut -d'=' -f2)"
+        local safe_host=$(echo "$HOST" | tr '.' '_')
+        eval "FAILURE_COUNTS_$safe_host=\${FAILURE_COUNTS_$safe_host:-0}"
+        eval "HOST_STATUS_$safe_host=\${HOST_STATUS_$safe_host:-0}"
+        log "初始化 $HOST: 失敗次數=$FAILURE_COUNTS_$safe_host, 狀態=$HOST_STATUS_$safe_host (Initialized)"
+        i=$((i+1))
     done
+
+    load_state
 
     local attempts=$((60 / INTERVAL))
     [ $attempts -lt 1 ] && attempts=1
 
-    for attempt in $(seq 1 $attempts); do
-        log "Monitor attempt $attempt/$attempts"
-        i=1
+    i=1
+    while [ $i -le $attempts ]; do
+        log "監控嘗試 $i/$attempts (Monitor attempt)"
+        local j=1
         for HOST in $HOSTS; do
-            REMARK=$(echo "$REMARKS" | cut -d',' -f$i)
+            REMARK=$(echo "$REMARKS" | cut -d',' -f$j)
             ping_host "$HOST" "$REMARK"
-            i=$((i+1))
+            j=$((j+1))
         done
         save_state
-        [ $attempt -lt $attempts ] && sleep "$INTERVAL"
+        i=$((i+1))
+        [ $i -le $attempts ] && sleep "$INTERVAL"
     done
 
     flock -u 200
@@ -304,32 +300,29 @@ monitor() {
 check_dependencies() {
     for cmd in curl ping flock; do
         if ! command -v $cmd >/dev/null 2>&1; then
-            echo -e "${RED}Missing dependency: $cmd${NC}"
-            echo -e "${YELLOW}Attempting to install $cmd...${NC}"
+            echo -e "${RED}缺少依賴: $cmd (Missing dependency)${NC}"
             if [ -f /etc/openwrt_release ]; then
                 opkg update >/dev/null 2>&1
                 opkg install curl iputils-ping util-linux >/dev/null 2>&1
             else
-                echo -e "${RED}Not detected OpenWrt/iStoreOS, please install $cmd manually${NC}"
-                log "ERROR: No supported package manager for $cmd"
+                echo -e "${RED}未檢測到 OpenWrt/iStoreOS，請手動安裝 $cmd (Please install manually)${NC}"
+                log "錯誤：無包管理器支持 $cmd (No package manager)${NC}"
                 exit 1
             fi
             if ! command -v $cmd >/dev/null 2>&1; then
-                echo -e "${RED}Failed to install $cmd, please install manually${NC}"
-                log "ERROR: Failed to install dependency: $cmd"
+                echo -e "${RED}安裝 $cmd 失敗，請手動安裝 (Failed to install)${NC}"
                 exit 1
             fi
         fi
     done
-    log "Dependencies checked: curl ping flock"
+    log "依賴檢查完成: curl ping flock (Dependencies checked)"
 }
 
 # Validate IP or domain
 validate_host() {
     local host="$1"
-    if echo "$host" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' >/dev/null; then
-        return 0
-    elif echo "$host" | grep -E '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$' >/dev/null; then
+    if echo "$host" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' >/dev/null || \
+       echo "$host" | grep -E '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$' >/dev/null; then
         return 0
     else
         return 1
@@ -339,104 +332,104 @@ validate_host() {
 # Print menu header
 print_menu_header() {
     clear
+    log "顯示菜單頭部 (Displaying menu header)"
     echo -e "${CYAN}════════════════════════════════════════${NC}"
-    echo -e "${CYAN}║     ${YELLOW}PingX Monitor System (v1.1.2)     ${CYAN}║${NC}"
-    echo -e "${CYAN}║     ${YELLOW}Author: TheX                  ${CYAN}║${NC}"
+    echo -e "${CYAN}║     ${YELLOW}PingX Monitor System (v1.1.7)     ${CYAN}║${NC}"
+    echo -e "${CYAN}║     ${YELLOW}作者: TheX (Author: TheX)         ${CYAN}║${NC}"
     echo -e "${CYAN}║     ${YELLOW}GitHub: https://github.com/MEILOI/ping-x ${CYAN}║${NC}"
     echo -e "${CYAN}════════════════════════════════════════${NC}"
     if [ -f /etc/openwrt_release ]; then
-        echo -e "${YELLOW}iStoreOS/OpenWrt Tip: Ensure WAN connectivity and DNS are working${NC}"
-        echo -e "${YELLOW}Check log for issues: /var/log/pingX_monitor.log${NC}"
+        echo -e "${YELLOW}提示：請確保 WAN 連線和 DNS 正常 (Tip: Ensure WAN and DNS are working)${NC}"
+        echo -e "${YELLOW}檢查日誌：/var/log/pingX_monitor.log (Check log)${NC}"
     fi
     echo ""
 }
 
 # Show current configuration
 show_config() {
-    echo -e "${CYAN}Current Configuration:${NC}"
+    echo -e "${CYAN}當前配置 (Current Configuration):${NC}"
     if [ -f "$CONFIG_FILE" ]; then
         . "$CONFIG_FILE"
-        echo -e "${CYAN}Notification Type:${NC} ${NOTIFY_TYPE:-Not set}"
+        echo -e "${CYAN}通知方式 (Notification Type):${NC} ${NOTIFY_TYPE:-未設置 (Not set)}"
         if [ "$NOTIFY_TYPE" = "telegram" ]; then
             if [ -n "$TG_BOT_TOKEN" ]; then
                 token_prefix=$(echo $TG_BOT_TOKEN | cut -d':' -f1)
-                token_masked="$token_prefix:****"
-                echo -e "${CYAN}Telegram Bot Token:${NC} $token_masked"
+                echo -e "${CYAN}Telegram Bot Token:${NC} $token_prefix:****"
             else
-                echo -e "${CYAN}Telegram Bot Token:${NC} ${RED}Not set${NC}"
+                echo -e "${CYAN}Telegram Bot Token:${NC} ${RED}未設置 (Not set)${NC}"
             fi
-            echo -e "${CYAN}Telegram Chat IDs:${NC} ${TG_CHAT_IDS:-Not set}"
+            echo -e "${CYAN}Telegram Chat IDs:${NC} ${TG_CHAT_IDS:-未設置 (Not set)}"
         else
             if [ -n "$DINGTALK_WEBHOOK" ]; then
                 webhook_masked=$(echo "$DINGTALK_WEBHOOK" | cut -c1-10)****
-                echo -e "${CYAN}DingTalk Webhook:${NC} $webhook_masked"
+                echo -e "${CYAN}釘釘 Webhook (DingTalk Webhook):${NC} $webhook_masked"
             else
-                echo -e "${CYAN}DingTalk Webhook:${NC} ${RED}Not set${NC}"
+                echo -e "${CYAN}釘釘 Webhook (DingTalk Webhook):${NC} ${RED}未設置 (Not set)${NC}"
             fi
         fi
-        echo -e "${CYAN}Monitor Interval:${NC} ${INTERVAL:-60} seconds"
-        echo -e "${CYAN}Offline Threshold:${NC} ${OFFLINE_THRESHOLD:-3} times"
-        echo -e "${CYAN}Host List:${NC}"
+        echo -e "${CYAN}監控間隔 (Monitor Interval):${NC} ${INTERVAL:-60} 秒 (seconds)"
+        echo -e "${CYAN}離線閾值 (Offline Threshold):${NC} ${OFFLINE_THRESHOLD:-3} 次 (times)"
+        echo -e "${CYAN}主機列表 (Host List):${NC}"
         if [ -n "$HOSTS_LIST" ]; then
             local HOSTS=$(echo "$HOSTS_LIST" | tr ',' ' ')
             local REMARKS="$REMARKS_LIST"
-            i=1
+            local i=1
             for host in $HOSTS; do
                 remark=$(echo "$REMARKS" | cut -d',' -f$i)
                 echo -e "  $i. $host ($remark)"
                 i=$((i+1))
             done
         else
-            echo -e "${RED}No hosts configured${NC}"
+            echo -e "${RED}未配置任何主機 (No hosts configured)${NC}"
         fi
     else
-        echo -e "${RED}Configuration file not found, please install the script first${NC}"
+        echo -e "${RED}未找到配置文件，請先安裝腳本 (Config file not found, please install)${NC}"
     fi
     echo ""
 }
 
-# View log function
+# View log
 view_log() {
     print_menu_header
-    echo -e "${CYAN}[View Log]${NC} Showing last 20 lines of /var/log/pingX_monitor.log:\n"
+    echo -e "${CYAN}[查看日誌 (View Log)]${NC} 顯示最新 20 行 (Showing last 20 lines):\n"
     if [ -f "$LOG_FILE" ]; then
         tail -n 20 "$LOG_FILE"
     else
-        echo -e "${RED}Log file does not exist${NC}"
+        echo -e "${RED}日誌文件不存在 (Log file does not exist)${NC}"
     fi
     echo ""
-    read -p "Press Enter to continue..."
+    read -p "按 Enter 鍵繼續... (Press Enter to continue...)"
 }
 
 # Install script
 install_script() {
     print_menu_header
-    echo -e "${CYAN}[Install] ${GREEN}Starting PingX Monitor installation...${NC}"
+    echo -e "${CYAN}[安裝 (Install)] ${GREEN}安裝 PingX 監控系統... (Installing PingX Monitor System...)${NC}"
     echo ""
 
     check_dependencies
 
-    echo -e "${CYAN}[1/5]${NC} Select notification type:"
+    echo -e "${CYAN}[1/5]${NC} 選擇通知方式 (Select notification type):"
     echo -e "${CYAN}1.${NC} Telegram"
-    echo -e "${CYAN}2.${NC} DingTalk"
-    read -p "Choose [1-2]: " notify_choice
+    echo -e "${CYAN}2.${NC} 釘釘 (DingTalk)"
+    read -p "請選擇 [1-2] (Choose [1-2]): " notify_choice
     case $notify_choice in
-        1) NOTIFY_TYPE="telegram" ;;
-        2) NOTIFY_TYPE="dingtalk" ;;
-        *) echo -e "${RED}Invalid choice, defaulting to Telegram${NC}"; NOTIFY_TYPE="telegram" ;;
+        1) NOTIFY_TYPE="telegram"; log "通知方式設置為 Telegram (Set to Telegram)" ;;
+        2) NOTIFY_TYPE="dingtalk"; log "通知方式設置為釘釘 (Set to DingTalk)" ;;
+        *) echo -e "${RED}無效選擇，默認 Telegram (Invalid choice, default Telegram)${NC}"; NOTIFY_TYPE="telegram"; log "無效選擇，默認 Telegram (Invalid choice)" ;;
     esac
 
     if [ "$NOTIFY_TYPE" = "telegram" ]; then
-        echo -e "\n${CYAN}[2/5]${NC} Enter Telegram Bot Token:"
-        read -p "Token (e.g., 123456789:ABCDEF...): " TG_BOT_TOKEN
-        echo -e "\n${CYAN}[3/5]${NC} Enter Telegram Chat ID (multiple IDs separated by commas):"
-        read -p "Chat ID(s): " TG_CHAT_IDS
+        echo -e "\n${CYAN}[2/5]${NC} 輸入 Telegram Bot Token (Enter Telegram Bot Token):"
+        read -p "Token (格式如123456789:ABCDEF...) (Format like 123456789:ABCDEF...): " TG_BOT_TOKEN
+        echo -e "\n${CYAN}[3/5]${NC} 輸入 Telegram Chat ID (Enter Telegram Chat ID):"
+        read -p "Chat ID (支持多個，逗號分隔) (Multiple IDs, comma-separated): " TG_CHAT_IDS
         if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_IDS" ]; then
-            validate_telegram && echo -e "${GREEN}Token valid${NC}" || echo -e "${RED}Token invalid, check log${NC}"
+            validate_telegram && echo -e "${GREEN}Token 有效 (Token valid)${NC}" || echo -e "${RED}Token 無效，請檢查日誌 (Token invalid, check log)${NC}"
         fi
         DINGTALK_WEBHOOK=""
     else
-        echo -e "\n${CYAN}[2/5]${NC} Enter DingTalk Webhook URL:"
+        echo -e "\n${CYAN}[2/5]${NC} 輸入釘釘 Webhook URL (Enter DingTalk Webhook URL):"
         read -p "Webhook: " DINGTALK_WEBHOOK
         if [ -n "$DINGTALK_WEBHOOK" ]; then
             validate_dingtalk "$DINGTALK_WEBHOOK"
@@ -445,39 +438,37 @@ install_script() {
         TG_CHAT_IDS=""
     fi
 
-    echo -e "\n${CYAN}[3/5]${NC} Enter IPs or domains to monitor (one per line, empty line to finish):"
-    echo -e "${YELLOW}Example: 192.168.1.1 or example.com${NC}"
+    echo -e "\n${CYAN}[3/5]${NC} 輸入要監控的 IP 或域名 (Enter IPs or domains to monitor):"
+    echo -e "${YELLOW}示例: 192.168.1.1 或 example.com (Example: 192.168.1.1 or example.com)${NC}"
     HOSTS_LIST=""
     REMARKS_LIST=""
     while true; do
-        read -p "IP or domain (empty to finish): " host
+        read -p "IP 或域名 (空行結束) (IP or domain, empty to finish): " host
         if [ -z "$host" ]; then
-            if [ -z "$HOSTS_LIST" ]; then
-                echo -e "${YELLOW}Warning: No hosts added${NC}"
-            fi
+            [ -z "$HOSTS_LIST" ] && echo -e "${YELLOW}警告: 未添加任何主機 (No hosts added)${NC}"
             break
         fi
         if ! validate_host "$host"; then
-            echo -e "${RED}Error: $host is not a valid IP or domain${NC}"
+            echo -e "${RED}錯誤：無效的 IP 或域名 (Invalid IP or domain)${NC}"
             continue
         fi
-        read -p "Enter remark for $host: " remark
+        read -p "請輸入備註 (Enter remark for $host): " remark
         if [ -z "$remark" ]; then
-            echo -e "${RED}Error: Remark cannot be empty${NC}"
+            echo -e "${RED}錯誤：備註不能為空 (Remark cannot be empty)${NC}"
             continue
         fi
         [ -n "$HOSTS_LIST" ] && HOSTS_LIST="$HOSTS_LIST,"
         [ -n "$REMARKS_LIST" ] && REMARKS_LIST="$REMARKS_LIST,"
         HOSTS_LIST="$HOSTS_LIST$host"
         REMARKS_LIST="$REMARKS_LIST$remark"
-        echo -e "${GREEN}Added: $host ($remark)${NC}"
+        echo -e "${GREEN}已添加: $host ($remark) (Added)${NC}"
     done
 
-    echo -e "\n${CYAN}[4/5]${NC} Enter monitor interval (seconds, default 60):"
-    read -p "Interval: " INTERVAL
+    echo -e "\n${CYAN}[4/5]${NC} 輸入監控間隔 (Enter monitor interval):"
+    read -p "間隔 (秒，默認60) (Seconds, default 60): " INTERVAL
     INTERVAL=${INTERVAL:-60}
-    echo -e "\n${CYAN}[5/5]${NC} Enter offline threshold (consecutive failures, default 3):"
-    read -p "Threshold: " OFFLINE_THRESHOLD
+    echo -e "\n${CYAN}[5/5]${NC} 輸入離線閾值 (Enter offline threshold):"
+    read -p "閾值 (連續失敗次數，默認3) (Consecutive failures, default 3): " OFFLINE_THRESHOLD
     OFFLINE_THRESHOLD=${OFFLINE_THRESHOLD:-3}
 
     save_config
@@ -486,26 +477,32 @@ install_script() {
     cp "$0" "$SCRIPT_PATH"
     chmod +x "$SCRIPT_PATH"
 
-    if ! grep -q "pingX_monitor.sh monitor" "$CRONTAB_PATH"; then
-        echo "$CRON_JOB" >> "$CRONTAB_PATH"
-        if [ -f /etc/openwrt_release ]; then
-            /etc/init.d/cron restart >/dev/null 2>&1
+    sed -i '/pingX_monitor.sh monitor/d' "$CRONTAB_PATH"
+    echo "$CRON_JOB" >> "$CRONTAB_PATH"
+    if [ -f /etc/openwrt_release ]; then
+        /etc/init.d/cron restart >/dev/null 2>&1
+        if grep -q "pingX_monitor.sh monitor" "$CRONTAB_PATH"; then
+            log "計劃任務配置成功 (Crontab configured)"
+        else
+            log "錯誤：計劃任務配置失敗 (Crontab failed)"
+            echo -e "${RED}錯誤：計劃任務配置失敗 (Crontab configuration failed)${NC}"
+            exit 1
         fi
     fi
 
     rm -f "$STATE_FILE"
-    log "Cleared state file during installation"
+    log "安裝時清除狀態文件 (Cleared state file)"
 
-    echo -e "\n${GREEN}✅ Installation complete!${NC}"
-    echo -e "${YELLOW}Tip: Use the menu to test notifications${NC}"
-    log "Installation completed"
+    echo -e "\n${GREEN}✅ 安裝完成！(Installation complete!)${NC}"
+    echo -e "${YELLOW}提示: 可以從菜單選擇'測試通知'驗證配置 (Tip: Test notifications from menu)${NC}"
+    log "安裝完成 (Installation completed)"
     sleep 2
 }
 
 # Uninstall script
 uninstall_script() {
     print_menu_header
-    echo -e "${CYAN}[Uninstall] ${YELLOW}Uninstalling PingX Monitor...${NC}\n"
+    echo -e "${CYAN}[卸載 (Uninstall)] ${YELLOW}卸載 PingX 監控系統... (Uninstalling PingX Monitor System...)${NC}\n"
 
     sed -i '/pingX_monitor.sh monitor/d' "$CRONTAB_PATH"
     if [ -f /etc/openwrt_release ]; then
@@ -515,9 +512,9 @@ uninstall_script() {
     rm -f "$LOG_FILE" "${LOG_FILE}".*
     rmdir /var/log 2>/dev/null || true
 
-    echo -e "\n${GREEN}✅ Uninstallation complete!${NC}"
-    echo -e "${YELLOW}All configuration files and scripts removed${NC}"
-    log "Uninstallation completed"
+    echo -e "\n${GREEN}✅ 卸載完成！(Uninstallation complete!)${NC}"
+    echo -e "${YELLOW}所有配置文件和腳本已刪除 (All configs and scripts removed)${NC}"
+    log "卸載完成 (Uninstallation completed)"
     sleep 2
     exit 0
 }
@@ -527,263 +524,191 @@ test_notifications() {
     load_config
     while true; do
         print_menu_header
-        echo -e "${CYAN}[Test Notifications]${NC} Select notification type to test:\n"
-        echo -e "${CYAN}1.${NC} Test offline notification"
-        echo -e "${CYAN}2.${NC} Test online notification"
-        echo -e "${CYAN}0.${NC} Return to main menu"
+        echo -e "${CYAN}[測試通知 (Test Notifications)]${NC} 選擇要測試的通知類型 (Select notification type):\n"
+        echo -e "${CYAN}1.${NC} 測試離線通知 (Test offline notification)"
+        echo -e "${CYAN}2.${NC} 測試上線通知 (Test online notification)"
+        echo -e "${CYAN}0.${NC} 返回主菜單 (Return to main menu)"
         echo ""
-        read -p "Choose [0-2]: " choice
-
+        read -p "請選擇 [0-2] (Choose [0-2]): " choice
         case $choice in
             1)
-                echo -e "\n${YELLOW}Sending offline notification...${NC}"
+                echo -e "\n${YELLOW}正在發送離線通知... (Sending offline notification...)${NC}"
                 local test_host="192.168.1.100"
-                local test_remark="Test Host"
+                local test_remark="測試主機 (Test Host)"
                 local time=$(date '+%Y-%m-%d %H:%M:%S')
-                local message="🛑 *Host Offline Notification*\n\n📍 *Host*: $test_host\n📝 *Remark*: $test_remark\n🕒 *Time*: $time\n⚠️ *Consecutive Failures*: ${OFFLINE_THRESHOLD}"
-                send_notification "$message" && echo -e "\n${GREEN}Notification sent, check your channel${NC}" || echo -e "\n${RED}Notification failed, check log${NC}"
-                read -p "Press Enter to continue..."
+                local message="🛑 *主機離線通知 (Host Offline Notification)*\n\n📍 *主機*: $test_host\n📝 *備註*: $test_remark\n🕒 *時間*: $time\n⚠️ *連續失敗*: ${OFFLINE_THRESHOLD}次 (Consecutive Failures)"
+                send_notification "$message" && echo -e "\n${GREEN}通知已發送，請檢查通知渠道 (Notification sent, check channel)${NC}" || echo -e "\n${RED}通知發送失敗，請檢查日誌 (Notification failed, check log)${NC}"
+                read -p "按 Enter 鍵繼續... (Press Enter to continue...)"
                 ;;
             2)
-                echo -e "\n${YELLOW}Sending online notification...${NC}"
+                echo -e "\n${YELLOW}正在發送上線通知... (Sending online notification...)${NC}"
                 local test_host="192.168.1.100"
-                local test_remark="Test Host"
+                local test_remark="測試主機 (Test Host)"
                 local time=$(date '+%Y-%m-%d %H:%M:%S')
-                local message="✅ *Host Online Notification*\n\n📍 *Host*: $test_host\n📝 *Remark*: $test_remark\n🕒 *Time*: $time"
-                send_notification "$message" && echo -e "\n${GREEN}Notification sent, check your channel${NC}" || echo -e "\n${RED}Notification failed, check log${NC}"
-                read -p "Press Enter to continue..."
+                local message="✅ *主機上線通知 (Host Online Notification)*\n\n📍 *主機*: $test_host\n📝 *備註*: $test_remark\n🕒 *時間*: $time"
+                send_notification "$message" && echo -e "\n${GREEN}通知已發送，請檢查通知渠道 (Notification sent, check channel)${NC}" || echo -e "\n${RED}通知發送失敗，請檢查日誌 (Notification failed, check log)${NC}"
+                read -p "按 Enter 鍵繼續... (Press Enter to continue...)"
                 ;;
             0)
                 break
                 ;;
             *)
-                echo -e "${RED}Invalid choice, try again${NC}"
+                echo -e "${RED}無效選擇，請重試 (Invalid choice, try again)${NC}"
                 sleep 1
                 ;;
         esac
     done
 }
 
-# Modify configuration
-modify_config() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}Error: Configuration file not found, please install script first${NC}"
-        sleep 2
-        return
-    fi
-
+# Settings menu
+settings_menu() {
     load_config
     while true; do
         print_menu_header
-        echo -e "${CYAN}[Configuration Settings]${NC}\n"
-        show_config
-
-        echo -e "Select configuration to modify:"
-        echo -e "${CYAN}1.${NC} List current configuration"
-        echo -e "${CYAN}2.${NC} Change notification type"
-        echo -e "${CYAN}3.${NC} Modify Telegram configuration"
-        echo -e "${CYAN}4.${NC} Modify DingTalk Webhook"
-        echo -e "${CYAN}5.${NC} Modify host list and remarks"
-        echo -e "${CYAN}6.${NC} Modify monitor interval"
-        echo -e "${CYAN}7.${NC} Modify offline threshold"
-        echo -e "${CYAN}0.${NC} Return to main menu"
+        echo -e "${CYAN}[設置 (Settings)]${NC} 選擇要修改的配置 (Select configuration to modify):\n"
+        echo -e "${CYAN}1.${NC} 修改通知方式 (Change notification type)"
+        echo -e "${CYAN}2.${NC} 修改監控間隔 (Change monitor interval)"
+        echo -e "${CYAN}3.${NC} 修改離線閾值 (Change offline threshold)"
+        echo -e "${CYAN}4.${NC} 添加主機 (Add host)"
+        echo -e "${CYAN}5.${NC} 刪除主機 (Remove host)"
+        echo -e "${CYAN}0.${NC} 返回主菜單 (Return to main menu)"
         echo ""
-        read -p "Choose [0-7]: " choice
-
+        read -p "請選擇 [0-5] (Choose [0-5]): " choice
         case $choice in
             1)
-                echo -e "\n${CYAN}Current Configuration:${NC}"
-                show_config
-                read -p "Press Enter to continue..."
-                ;;
-            2)
-                echo -e "\n${CYAN}Select new notification type:${NC}"
+                echo -e "\n${CYAN}選擇通知方式 (Select notification type):${NC}"
                 echo -e "${CYAN}1.${NC} Telegram"
-                echo -e "${CYAN}2.${NC} DingTalk"
-                read -p "Choose [1-2]: " notify_choice
+                echo -e "${CYAN}2.${NC} 釘釘 (DingTalk)"
+                read -p "請選擇 [1-2] (Choose [1-2]): " notify_choice
                 case $notify_choice in
                     1)
                         NOTIFY_TYPE="telegram"
-                        sed -i "s/NOTIFY_TYPE=.*/NOTIFY_TYPE=\"telegram\"/" "$CONFIG_FILE"
-                        echo -e "${GREEN}Notification type set to Telegram${NC}"
-                        log "Notification type set to telegram"
+                        log "通知方式設置為 Telegram (Set to Telegram)"
+                        echo -e "\n${CYAN}輸入 Telegram Bot Token:${NC}"
+                        read -p "Token: " TG_BOT_TOKEN
+                        echo -e "\n${CYAN}輸入 Telegram Chat ID:${NC}"
+                        read -p "Chat ID (支持多個，逗號分隔): " TG_CHAT_IDS
+                        if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_IDS" ]; then
+                            validate_telegram && echo -e "${GREEN}Token 有效${NC}" || echo -e "${RED}Token 無效，請檢查日誌${NC}"
+                        fi
+                        DINGTALK_WEBHOOK=""
                         ;;
                     2)
                         NOTIFY_TYPE="dingtalk"
-                        sed -i "s/NOTIFY_TYPE=.*/NOTIFY_TYPE=\"dingtalk\"/" "$CONFIG_FILE"
-                        echo -e "${GREEN}Notification type set to DingTalk${NC}"
-                        log "Notification type set to dingtalk"
+                        log "通知方式設置為釘釘 (Set to DingTalk)"
+                        echo -e "\n${CYAN}輸入釘釘 Webhook URL:${NC}"
+                        read -p "Webhook: " DINGTALK_WEBHOOK
+                        if [ -n "$DINGTALK_WEBHOOK" ]; then
+                            validate_dingtalk "$DINGTALK_WEBHOOK"
+                        fi
+                        TG_BOT_TOKEN=""
+                        TG_CHAT_IDS=""
                         ;;
                     *)
-                        echo -e "${RED}Invalid choice, notification type unchanged${NC}"
+                        echo -e "${RED}無效選擇，保持原設置${NC}"
                         ;;
                 esac
+                save_config
+                echo -e "\n${GREEN}通知方式已更新${NC}"
+                read -p "按 Enter 鍵繼續..."
+                ;;
+            2)
+                echo -e "\n${CYAN}輸入監控間隔:${NC}"
+                read -p "間隔 (秒，當前 ${INTERVAL:-60}): " new_interval
+                if [ -n "$new_interval" ] && echo "$new_interval" | grep -E '^[0-9]+$' >/dev/null; then
+                    INTERVAL="$new_interval"
+                    save_config
+                    echo -e "${GREEN}監控間隔已更新為 $INTERVAL 秒${NC}"
+                else
+                    echo -e "${RED}無效輸入，保持原間隔${NC}"
+                fi
+                read -p "按 Enter 鍵繼續..."
                 ;;
             3)
-                if [ "$NOTIFY_TYPE" != "telegram" ]; then
-                    echo -e "${RED}Current notification type is not Telegram, please switch first${NC}"
-                    sleep 2
-                    continue
+                echo -e "\n${CYAN}輸入離線閾值:${NC}"
+                read -p "閾值 (連續失敗次數，當前 ${OFFLINE_THRESHOLD:-3}): " new_threshold
+                if [ -n "$new_threshold" ] && echo "$new_threshold" | grep -E '^[0-9]+$' >/dev/null; then
+                    OFFLINE_THRESHOLD="$new_threshold"
+                    save_config
+                    echo -e "${GREEN}離線閾值已更新為 $OFFLINE_THRESHOLD 次${NC}"
+                else
+                    echo -e "${RED}無效輸入，保持原閾值${NC}"
                 fi
-                echo -e "\n${YELLOW}Enter new Telegram Bot Token:${NC}"
-                read -p "Token: " new_token
-                if [ -n "$new_token" ]; then
-                    sed -i "s/TG_BOT_TOKEN=.*/TG_BOT_TOKEN=\"$new_token\"/" "$CONFIG_FILE"
-                    TG_BOT_TOKEN="$new_token"
-                    validate_telegram && echo -e "${GREEN}Telegram Token updated and valid${NC}" || echo -e "${RED}Telegram Token invalid${NC}"
-                    log "Telegram Bot Token updated"
-                fi
-                echo -e "\n${YELLOW}Enter new Telegram Chat ID(s) (comma-separated):${NC}"
-                read -p "Chat ID(s): " new_ids
-                if [ -n "$new_ids" ]; then
-                    sed -i "s/TG_CHAT_IDS=.*/TG_CHAT_IDS=\"$new_ids\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}Telegram Chat IDs updated${NC}"
-                    log "Telegram Chat IDs updated: $new_ids"
-                fi
+                read -p "按 Enter 鍵繼續..."
                 ;;
             4)
-                if [ "$NOTIFY_TYPE" != "dingtalk" ]; then
-                    echo -e "${RED}Current notification type is not DingTalk, please switch first${NC}"
-                    sleep 2
-                    continue
+                echo -e "\n${CYAN}添加主機:${NC}"
+                read -p "IP 或域名 (例如 192.168.1.1 或 example.com): " host
+                if [ -n "$host" ] && validate_host "$host"; then
+                    read -p "請輸入備註: " remark
+                    if [ -n "$remark" ]; then
+                        [ -n "$HOSTS_LIST" ] && HOSTS_LIST="$HOSTS_LIST,"
+                        [ -n "$REMARKS_LIST" ] && REMARKS_LIST="$REMARKS_LIST,"
+                        HOSTS_LIST="$HOSTS_LIST$host"
+                        REMARKS_LIST="$REMARKS_LIST$remark"
+                        save_config
+                        echo -e "${GREEN}已添加: $host ($remark)${NC}"
+                    else
+                        echo -e "${RED}備註不能為空${NC}"
+                    fi
+                else
+                    echo -e "${RED}無效的 IP 或域名${NC}"
                 fi
-                echo -e "\n${YELLOW}Enter new DingTalk Webhook URL:${NC}"
-                read -p "Webhook: " new_webhook
-                if [ -n "$new_webhook" ]; then
-                    validate_dingtalk "$new_webhook"
-                    sed -i "s|DINGTALK_WEBHOOK=.*|DINGTALK_WEBHOOK=\"$new_webhook\"|" "$CONFIG_FILE"
-                    echo -e "${GREEN}DingTalk Webhook updated${NC}"
-                    log "DingTalk Webhook updated"
-                fi
+                read -p "按 Enter 鍵繼續..."
                 ;;
             5)
-                echo -e "\n${CYAN}Current Host List:${NC}"
-                if [ -n "$HOSTS_LIST" ]; then
-                    local HOSTS=$(echo "$HOSTS_LIST" | tr ',' ' ')
-                    local REMARKS="$REMARKS_LIST"
-                    i=1
-                    for host in $HOSTS; do
-                        remark=$(echo "$REMARKS" | cut -d',' -f$i)
-                        echo -e "  $i. $host ($remark)"
-                        i=$((i+1))
-                    done
-                else
-                    echo -e "${RED}No hosts configured${NC}"
+                if [ -z "$HOSTS_LIST" ]; then
+                    echo -e "${RED}無主機可刪除${NC}"
+                    read -p "按 Enter 鍵繼續..."
+                    continue
                 fi
-                echo ""
-                echo -e "${CYAN}Host Management:${NC}"
-                echo -e "${CYAN}1.${NC} Add host"
-                echo -e "${CYAN}2.${NC} Delete host"
-                echo -e "${CYAN}0.${NC} Save and return"
-                read -p "Choose [0-2]: " host_choice
-                case $host_choice in
-                    1)
-                        echo -e "\n${YELLOW}Enter new IP or domain:${NC}"
-                        read -p "IP or domain: " host
-                        if [ -n "$host" ] && validate_host "$host"; then
-                            read -p "Enter remark for $host: " remark
-                            if [ -n "$remark" ]; then
-                                [ -n "$HOSTS_LIST" ] && HOSTS_LIST="$HOSTS_LIST,"
-                                [ -n "$REMARKS_LIST" ] && REMARKS_LIST="$REMARKS_LIST,"
-                                HOSTS_LIST="$HOSTS_LIST$host"
-                                REMARKS_LIST="$REMARKS_LIST$remark"
-                                echo -e "${GREEN}Added: $host ($remark)${NC}"
-                            else
-                                echo -e "${RED}Error: Remark cannot be empty${NC}"
-                            fi
-                        else
-                            echo -e "${RED}Error: Invalid IP or domain${NC}"
-                        fi
-                        ;;
-                    2)
-                        if [ -z "$HOSTS_LIST" ]; then
-                            echo -e "${RED}Error: Host list is empty${NC}"
-                            sleep 2
-                            continue
-                        fi
-                        echo -e "\n${YELLOW}Enter host number to delete:${NC}"
-                        local HOSTS=$(echo "$HOSTS_LIST" | tr ',' ' ')
-                        local REMARKS="$REMARKS_LIST"
-                        i=1
-                        for host in $HOSTS; do
-                            i=$((i+1))
-                        done
-                        read -p "Number (1-$((i-1))): " delete_index
-                        if echo "$delete_index" | grep -q -v '^[0-9]\+$' || [ "$delete_index" -lt 1 ] || [ "$delete_index" -gt $((i-1)) ]; then
-                            echo -e "${RED}Error: Invalid number, enter 1 to $((i-1))${NC}"
-                            sleep 2
-                            continue
-                        fi
-                        new_hosts=""
-                        new_remarks=""
-                        j=1
-                        for host in $HOSTS; do
+                echo -e "\n${CYAN}選擇要刪除的主機:${NC}"
+                local HOSTS=$(echo "$HOSTS_LIST" | tr ',' ' ')
+                local REMARKS="$REMARKS_LIST"
+                local i=1
+                for host in $HOSTS; do
+                    remark=$(echo "$REMARKS" | cut -d',' -f$i)
+                    echo -e "${CYAN}$i.${NC} $host ($remark)"
+                    i=$((i+1))
+                done
+                read -p "請輸入編號 (0 取消): " index
+                if [ "$index" = "0" ] || [ -z "$index" ]; then
+                    echo -e "${YELLOW}取消刪除${NC}"
+                    read -p "按 Enter 鍵繼續..."
+                    continue
+                fi
+                if echo "$index" | grep -E '^[0-9]+$' >/dev/null && [ "$index" -ge 1 ] && [ "$index" -lt "$i" ]; then
+                    local new_hosts=""
+                    local new_remarks=""
+                    local j=1
+                    for host in $HOSTS; do
+                        if [ "$j" != "$index" ]; then
+                            [ -n "$new_hosts" ] && new_hosts="$new_hosts,"
+                            new_hosts="$new_hosts$host"
                             remark=$(echo "$REMARKS" | cut -d',' -f$j)
-                            if [ "$j" -ne "$delete_index" ]; then
-                                [ -n "$new_hosts" ] && new_hosts="$new_hosts,"
-                                [ -n "$new_remarks" ] && new_remarks="$new_remarks,"
-                                new_hosts="$new_hosts$host"
-                                new_remarks="$new_remarks$remark"
-                            fi
-                            j=$((j+1))
-                        done
-                        HOSTS_LIST="$new_hosts"
-                        REMARKS_LIST="$new_remarks"
-                        echo -e "${GREEN}Host deleted${NC}"
-                        log "Deleted host: index $delete_index"
-                        ;;
-                    0)
-                        sed -i "s/HOSTS_LIST=.*/HOSTS_LIST=\"$HOSTS_LIST\"/" "$CONFIG_FILE"
-                        sed -i "s/REMARKS_LIST=.*/REMARKS_LIST=\"$REMARKS_LIST\"/" "$CONFIG_FILE"
-                        echo -e "${GREEN}Host list and remarks updated${NC}"
-                        log "Host list and remarks updated"
-                        break
-                        ;;
-                    *)
-                        echo -e "${RED}Invalid choice, try again${NC}"
-                        sleep 1
-                        ;;
-                esac
-                ;;
-            6)
-                echo -e "\n${YELLOW}Enter new monitor interval (seconds):${NC}"
-                read -p "Interval (default 60): " new_interval
-                new_interval=${new_interval:-60}
-                sed -i "s/INTERVAL=.*/INTERVAL=\"$new_interval\"/" "$CONFIG_FILE"
-                echo -e "${GREEN}Monitor interval updated to ${new_interval} seconds${NC}"
-                log "Interval updated to $new_interval seconds"
-                ;;
-            7)
-                echo -e "\n${YELLOW}Enter new offline threshold (consecutive failures):${NC}"
-                read -p "Threshold (default 3): " new_threshold
-                new_threshold=${new_threshold:-3}
-                sed -i "s/OFFLINE_THRESHOLD=.*/OFFLINE_THRESHOLD=\"$new_threshold\"/" "$CONFIG_FILE"
-                echo -e "${GREEN}Offline threshold updated to ${new_threshold} times${NC}"
-                log "Offline threshold updated to $new_threshold"
+                            [ -n "$new_remarks" ] && new_remarks="$new_remarks,"
+                            new_remarks="$new_remarks$remark"
+                        fi
+                        j=$((j+1))
+                    done
+                    HOSTS_LIST="$new_hosts"
+                    REMARKS_LIST="$new_remarks"
+                    save_config
+                    echo -e "${GREEN}主機已刪除${NC}"
+                else
+                    echo -e "${RED}無效編號${NC}"
+                fi
+                read -p "按 Enter 鍵繼續..."
                 ;;
             0)
                 break
                 ;;
             *)
-                echo -e "${RED}Invalid choice, try again${NC}"
+                echo -e "${RED}無效選擇，請重試${NC}"
                 sleep 1
                 ;;
         esac
-        sleep 1
-        load_config
     done
-}
-
-# Show usage help
-show_usage() {
-    echo "Usage: $0 [command]"
-    echo ""
-    echo "Commands:"
-    echo "  install   Install the script"
-    echo "  uninstall Uninstall the script"
-    echo "  monitor   Run monitoring (called by cron)"
-    echo "  menu      Show interactive menu (default)"
-    echo ""
 }
 
 # Main menu
@@ -791,35 +716,34 @@ show_menu() {
     while true; do
         print_menu_header
         if [ -f "$CONFIG_FILE" ]; then
-            echo -e "${GREEN}● Monitor system installed${NC}\n"
+            echo -e "${GREEN}● 監控系統已安裝 (Monitor system installed)${NC}\n"
             show_config
         else
-            echo -e "${RED}● Monitor system not installed${NC}\n"
+            echo -e "${RED}● 監控系統未安裝 (Monitor system not installed)${NC}\n"
         fi
 
-        echo -e "Select operation:"
-        echo -e "${CYAN}1.${NC} Install/Reinstall"
-        echo -e "${CYAN}2.${NC} Configuration settings"
-        echo -e "${CYAN}3.${NC} Test notifications"
-        echo -e "${CYAN}4.${NC} Uninstall"
-        echo -e "${CYAN}5.${NC} View log"
-        echo -e "${CYAN}0.${NC} Exit"
+        echo -e "請選擇操作 (Select operation):"
+        echo -e "${CYAN}1.${NC} 安裝/重新安裝 (Install/Reinstall)"
+        echo -e "${CYAN}2.${NC} 測試通知 (Test notifications)"
+        echo -e "${CYAN}3.${NC} 設置 (Settings)"
+        echo -e "${CYAN}4.${NC} 卸載 (Uninstall)"
+        echo -e "${CYAN}5.${NC} 查看日誌 (View log)"
+        echo -e "${CYAN}0.${NC} 退出 (Exit)"
         echo ""
-        read -p "Choose [0-5]: " choice
-
+        read -p "請選擇 [0-5] (Choose [0-5]): " choice
         case $choice in
             1)
                 install_script
                 ;;
             2)
-                modify_config
-                ;;
-            3)
                 test_notifications
                 ;;
+            3)
+                settings_menu
+                ;;
             4)
-                echo -e "\n${YELLOW}Warning: This will delete all configurations and scripts!${NC}"
-                read -p "Confirm uninstall? [y/N]: " confirm
+                echo -e "\n${YELLOW}警告: 此操作將刪除所有配置和腳本！(This will delete all configs and scripts!)${NC}"
+                read -p "確認卸載? [y/N] (Confirm uninstall? [y/N]): " confirm
                 if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                     uninstall_script
                 fi
@@ -828,11 +752,11 @@ show_menu() {
                 view_log
                 ;;
             0)
-                echo -e "\n${GREEN}Thank you for using PingX Monitor!${NC}"
+                echo -e "\n${GREEN}感謝使用 PingX 監控系統！(Thank you for using PingX Monitor!)${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid choice, try again${NC}"
+                echo -e "${RED}無效選擇，請重試 (Invalid choice, try again)${NC}"
                 sleep 1
                 ;;
         esac
@@ -840,32 +764,14 @@ show_menu() {
 }
 
 main() {
-    if [ "$1" = "menu" ] || [ -z "$1" ]; then
-        if [ -x "$SCRIPT_PATH" ] && [ "$0" != "$SCRIPT_PATH" ]; then
-            exec "$SCRIPT_PATH" menu
-        else
-            show_menu
-        fi
+    if [ "$1" = "monitor" ]; then
+        monitor
+    elif [ "$1" = "install" ]; then
+        install_script
+    elif [ "$1" = "uninstall" ]; then
+        uninstall_script
     else
-        case "$1" in
-            monitor)
-                monitor
-                ;;
-            install)
-                install_script
-                ;;
-            uninstall)
-                uninstall_script
-                ;;
-            help|--help|-h)
-                show_usage
-                ;;
-            *)
-                echo -e "${RED}Error: Unknown command '$1'${NC}"
-                show_usage
-                exit 1
-                ;;
-        esac
+        show_menu
     fi
 }
 
